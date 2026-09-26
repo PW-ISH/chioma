@@ -6,7 +6,10 @@ import {
   assertSorobanSubmissionAccepted,
   waitForSorobanTransactionSuccess,
 } from './soroban-transaction-poller';
-import * as StellarSdk from '@stellar/stellar-sdk';
+import {
+  classifySorobanError,
+  sorobanBackoffMs,
+} from '../../../common/services/soroban-errors';
 import { BlockchainTransactionError } from '../../../common/errors';
 
 export interface MintObligationParams {
@@ -108,15 +111,8 @@ export class RentObligationNftService {
         params.adminAddress,
       );
 
-      const response = await this.server.sendTransaction(tx);
-      assertSorobanSubmissionAccepted(response);
-      await waitForSorobanTransactionSuccess(
-        this.server,
-        response.hash,
-        this.configService,
-      const response = await this.server.sendTransaction(tx);
-      const txHash = this.extractTransactionHash(
-        response,
+      const txHash = await this.submitWithRetry(
+        tx,
         `mint_obligation(${params.agreementId})`,
       );
 
@@ -154,15 +150,8 @@ export class RentObligationNftService {
         params.fromAddress,
       );
 
-      const response = await this.server.sendTransaction(tx);
-      assertSorobanSubmissionAccepted(response);
-      await waitForSorobanTransactionSuccess(
-        this.server,
-        response.hash,
-        this.configService,
-      const response = await this.server.sendTransaction(tx);
-      const txHash = this.extractTransactionHash(
-        response,
+      const txHash = await this.submitWithRetry(
+        tx,
         `transfer_obligation(${params.agreementId})`,
       );
 
@@ -349,15 +338,8 @@ export class RentObligationNftService {
         params.ownerAddress,
       );
 
-      const response = await this.server.sendTransaction(tx);
-      assertSorobanSubmissionAccepted(response);
-      await waitForSorobanTransactionSuccess(
-        this.server,
-        response.hash,
-        this.configService,
-      const response = await this.server.sendTransaction(tx);
-      const txHash = this.extractTransactionHash(
-        response,
+      const txHash = await this.submitWithRetry(
+        tx,
         `burn_nft(${params.tokenId})`,
       );
 
@@ -389,15 +371,8 @@ export class RentObligationNftService {
         params.adminAddress,
       );
 
-      const response = await this.server.sendTransaction(tx);
-      assertSorobanSubmissionAccepted(response);
-      await waitForSorobanTransactionSuccess(
-        this.server,
-        response.hash,
-        this.configService,
-      const response = await this.server.sendTransaction(tx);
-      const txHash = this.extractTransactionHash(
-        response,
+      const txHash = await this.submitWithRetry(
+        tx,
         `admin_reassign_obligation(${params.agreementId})`,
       );
 
@@ -522,6 +497,50 @@ export class RentObligationNftService {
     } catch (error) {
       this.logger.error(`Failed to get burned nfts for ${ownerAddress}`, error);
       return [];
+    }
+  }
+
+  /**
+   * Submit a transaction and poll until it settles. Retriable failures
+   * (network, RPC throttling, poll timeout) are retried with exponential
+   * backoff; permanent failures (validation, contract errors) fail fast.
+   * Resubmitting the same signed envelope is idempotent (same hash).
+   */
+  private async submitWithRetry(
+    tx: StellarSdk.Transaction,
+    operationLabel: string,
+  ): Promise<string> {
+    const maxAttempts = Number(
+      this.configService.get<string>('SOROBAN_TX_MAX_RETRIES', '5'),
+    );
+    let txHash: string | undefined;
+
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const response = await this.server.sendTransaction(tx);
+        txHash = this.extractTransactionHash(response, operationLabel);
+        assertSorobanSubmissionAccepted(response);
+        await waitForSorobanTransactionSuccess(
+          this.server,
+          txHash,
+          this.configService,
+        );
+        return txHash;
+      } catch (error) {
+        const kind = classifySorobanError(error);
+        const reason = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `${operationLabel} attempt ${attempt}/${maxAttempts} failed (${kind}) ` +
+            `tx=${txHash ?? 'n/a'}: ${reason}`,
+        );
+        if (kind === 'permanent' || attempt >= maxAttempts) {
+          throw new BlockchainTransactionError(
+            `${operationLabel} failed (${kind}) after ${attempt} attempt(s): ${reason}`,
+            { operationLabel, txHash, kind, attempts: attempt },
+          );
+        }
+        await new Promise((r) => setTimeout(r, sorobanBackoffMs(attempt)));
+      }
     }
   }
 

@@ -1,6 +1,10 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigService } from '@nestjs/config';
-import { EncryptionService } from '../services/encryption.service';
+import {
+  DecryptionError,
+  DecryptionErrorType,
+  EncryptionService,
+} from '../services/encryption.service';
 
 describe('EncryptionService', () => {
   let service: EncryptionService;
@@ -53,6 +57,42 @@ describe('EncryptionService', () => {
 
     it('should throw an error for invalid encrypted data', () => {
       expect(() => service.decrypt('invalid-base64-data')).toThrow();
+    });
+
+    const decryptError = (data: string): DecryptionError => {
+      try {
+        service.decrypt(data);
+      } catch (e) {
+        return e as DecryptionError;
+      }
+      throw new Error('expected decrypt to throw');
+    };
+
+    it('reports CORRUPTED_DATA for malformed or truncated payloads', () => {
+      expect(decryptError('not base64!').type).toBe(
+        DecryptionErrorType.CORRUPTED_DATA,
+      );
+      expect(decryptError('AAAA').type).toBe(
+        DecryptionErrorType.CORRUPTED_DATA,
+      );
+    });
+
+    it('reports INVALID_KEY when the key fingerprint does not match', () => {
+      const [v, , payload] = service.encrypt('secret').split('.');
+      const err = decryptError(`${v}.deadbeef.${payload}`);
+      expect(err).toBeInstanceOf(DecryptionError);
+      expect(err.type).toBe(DecryptionErrorType.INVALID_KEY);
+    });
+
+    it('reports TAMPERING when ciphertext is modified', () => {
+      const [v, fp, payload] = service.encrypt('secret').split('.');
+      const bytes = Buffer.from(payload, 'base64');
+      bytes[bytes.length - 1] ^= 0xff;
+      const err = decryptError(`${v}.${fp}.${bytes.toString('base64')}`);
+      expect(err.type).toBe(DecryptionErrorType.TAMPERING);
+      expect(
+        service.getDecryptionFailureMetrics()[DecryptionErrorType.TAMPERING],
+      ).toBe(1);
     });
 
     it('should handle empty strings', () => {
