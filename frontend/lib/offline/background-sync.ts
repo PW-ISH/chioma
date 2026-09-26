@@ -7,6 +7,31 @@ import { syncOfflineData } from './sync-manager';
 import { setMetadata, getMetadata } from './db';
 import { logger } from '../logger';
 
+declare global {
+  interface Window {
+    __CHIOMA_CLIENT_LOGGER__?: {
+      info?: (message: string, meta?: unknown) => void;
+      warn?: (message: string, meta?: unknown) => void;
+      error?: (message: string, meta?: unknown) => void;
+    };
+  }
+}
+
+const logger = {
+  info(message: string, meta?: unknown): void {
+    if (typeof window === 'undefined') return;
+    window.__CHIOMA_CLIENT_LOGGER__?.info?.(message, meta);
+  },
+  warn(message: string, meta?: unknown): void {
+    if (typeof window === 'undefined') return;
+    window.__CHIOMA_CLIENT_LOGGER__?.warn?.(message, meta);
+  },
+  error(message: string, meta?: unknown): void {
+    if (typeof window === 'undefined') return;
+    window.__CHIOMA_CLIENT_LOGGER__?.error?.(message, meta);
+  },
+};
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const SYNC_TAG = 'chioma-offline-sync';
@@ -36,7 +61,7 @@ export async function registerBackgroundSync(): Promise<boolean> {
         }
       ).sync;
       await syncManager.register(SYNC_TAG);
-      logger.log('Background sync registered');
+      logger.info('Background sync registered');
       return true;
     } else {
       logger.warn('Background Sync not supported');
@@ -59,7 +84,7 @@ export async function triggerSync(): Promise<void> {
     await setMetadata(LAST_SYNC_KEY, Date.now());
 
     if (result.success) {
-      logger.log('Sync completed successfully', result);
+      logger.info('Sync completed successfully', result);
     } else {
       logger.warn('Sync completed with errors', result);
     }
@@ -122,7 +147,7 @@ export function stopPeriodicSync(): void {
  */
 export function setupAutoSync(): () => void {
   const handleOnline = async () => {
-    logger.log('Connection restored, triggering sync...');
+    logger.info('Connection restored, triggering sync');
     await triggerSync();
   };
 

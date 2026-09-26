@@ -1,3 +1,37 @@
+import { Controller, Get, Param, Patch, Query } from '@nestjs/common';
+import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
+import { PerformanceAlertService } from './performance-alert.service';
+import { AlertSeverity } from './entities/performance-alert.entity';
+
+@ApiTags('Monitoring')
+@Controller('monitoring/performance')
+export class PerformanceController {
+  constructor(private readonly alertService: PerformanceAlertService) {}
+
+  @Get('alerts')
+  @ApiOperation({ summary: 'List persisted performance threshold alerts' })
+  @ApiQuery({ name: 'severity', required: false, enum: AlertSeverity })
+  @ApiQuery({ name: 'resolved', required: false, type: Boolean })
+  @ApiQuery({ name: 'since', required: false, description: 'ISO timestamp' })
+  @ApiQuery({ name: 'limit', required: false, type: Number })
+  async getAlerts(
+    @Query('severity') severity?: AlertSeverity,
+    @Query('resolved') resolved?: string,
+    @Query('since') since?: string,
+    @Query('limit') limit?: string,
+  ) {
+    const alerts = await this.alertService.getAlerts({
+      severity: Object.values(AlertSeverity).includes(severity!)
+        ? severity
+        : undefined,
+      resolved:
+        resolved === 'true' ? true : resolved === 'false' ? false : undefined,
+      since: since && !isNaN(Date.parse(since)) ? new Date(since) : undefined,
+      limit: limit ? parseInt(limit, 10) || undefined : undefined,
+    });
+    return {
+      alerts,
+      total: alerts.length,
 import {
   Controller,
   Get,
@@ -18,6 +52,9 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
+import { PaginationQueryDto } from '../../common/dto/pagination-query.dto';
+import { ApiPaginatedResponse } from '../../common/decorators/api-paginated-response.decorator';
+import { PaginationUtils } from '../../common/utils';
 
 @ApiTags('Performance Monitoring')
 @Controller('api/performance')
@@ -46,18 +83,39 @@ export class PerformanceController {
     };
   }
 
+  @Get('database')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @ApiOperation({
+    summary: 'Get database query performance statistics',
+    description:
+      'Per-operation query timings (avg/p95), the slowest operations, and recent slow queries.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Database query performance statistics retrieved successfully',
+  })
+  @HttpCode(HttpStatus.OK)
+  async getDatabaseStats() {
+    return {
+      timestamp: new Date().toISOString(),
+      database: this.performanceMonitor.getDatabaseStats(),
+    };
+  }
+
   @Get('endpoints')
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   @ApiOperation({ summary: 'Get performance statistics for all endpoints' })
-  @ApiResponse({
-    status: 200,
-    description: 'Endpoint performance statistics retrieved successfully',
-  })
+  @ApiPaginatedResponse(Object)
   @HttpCode(HttpStatus.OK)
-  async getEndpointStats() {
+  async getEndpointStats(@Query() query: PaginationQueryDto) {
     const systemStats = this.performanceMonitor.getSystemStats();
+    const paginated = PaginationUtils.paginateArray(
+      systemStats.endpointStats,
+      query.page || 1,
+      query.limit || 20,
+    );
     return {
-      endpoints: systemStats.endpointStats,
+      ...paginated,
       summary: {
         totalEndpoints: systemStats.totalEndpoints,
         totalRequests: systemStats.totalRequests,
@@ -164,26 +222,18 @@ export class PerformanceController {
   @Get('alerts')
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   @ApiOperation({ summary: 'Get recent performance alerts' })
-  @ApiQuery({
-    name: 'limit',
-    description: 'Number of alerts to return',
-    required: false,
-    example: 10,
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Performance alerts retrieved successfully',
-  })
+  @ApiPaginatedResponse(Object)
   @HttpCode(HttpStatus.OK)
-  async getAlerts(@Query('limit') limit?: string) {
+  async getAlerts(@Query() query: PaginationQueryDto) {
     // This would typically fetch from a database or cache
     // For now, return a placeholder response
-    const alertLimit = limit ? parseInt(limit, 10) : 10;
-
     return {
-      alerts: [], // Would be populated with actual alert data
-      count: 0,
-      limit: alertLimit,
+      ...PaginationUtils.buildPaginationResponse(
+        [], // Would be populated with actual alert data
+        0,
+        query.page || 1,
+        query.limit || 10,
+      ),
       timestamp: new Date().toISOString(),
       message: 'No recent performance alerts',
     };
@@ -230,6 +280,153 @@ export class PerformanceController {
           },
         ],
       },
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  @Get('response-times')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @ApiOperation({
+    summary: 'Per-route response-time summary for a sliding window',
+  })
+  @ApiQuery({
+    name: 'window',
+    description: 'Sliding window in seconds',
+    required: false,
+    example: 60,
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Response-time stats retrieved successfully',
+  })
+  @HttpCode(HttpStatus.OK)
+  getResponseTimes(@Query('window') window?: string) {
+    const windowSeconds = window ? parseInt(window, 10) : 60;
+    const {
+      generatedAt,
+      windowSeconds: ws,
+      routes,
+    } = this.performanceMonitor.getResponseTimeStats(windowSeconds);
+
+    return {
+      generated_at: generatedAt.toISOString(),
+      window_seconds: ws,
+      routes: routes.map((r) => ({
+        route: r.route,
+        count: r.count,
+        rps: r.rps,
+        p50_ms: r.p50Ms,
+        p95_ms: r.p95Ms,
+        p99_ms: r.p99Ms,
+        slow_count: r.slowCount,
+      })),
+    };
+  }
+
+  @Get('slow-endpoints')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @ApiOperation({
+    summary: 'Get the slowest API endpoints by average response time',
+  })
+  @ApiQuery({
+    name: 'limit',
+    description: 'Maximum number of endpoints to return',
+    required: false,
+    example: 10,
+  })
+  @ApiQuery({
+    name: 'threshold',
+    description: 'Minimum average response time in ms to include',
+    required: false,
+    example: 500,
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Slow endpoints retrieved successfully',
+  })
+  @HttpCode(HttpStatus.OK)
+  async getSlowEndpoints(
+    @Query('limit') limit?: string,
+    @Query('threshold') threshold?: string,
+  ) {
+    const parsedLimit = limit ? parseInt(limit, 10) : 10;
+    const parsedThreshold = threshold ? parseInt(threshold, 10) : 0;
+
+    const endpoints = this.performanceMonitor.getSlowEndpoints(
+      parsedLimit,
+      parsedThreshold,
+    );
+
+    return {
+      endpoints,
+      count: endpoints.length,
+      thresholdMs: parsedThreshold,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
+  @Patch('alerts/:id/resolve')
+  @ApiOperation({ summary: 'Mark a performance alert as resolved' })
+  resolveAlert(@Param('id') id: string) {
+    return this.alertService.resolve(id);
+  @Get('percentiles')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @ApiOperation({
+    summary:
+      'Get response-time percentile breakdown for all endpoints, or a specific one',
+  })
+  @ApiQuery({
+    name: 'method',
+    description: 'HTTP method (omit for all endpoints)',
+    required: false,
+    example: 'GET',
+  })
+  @ApiQuery({
+    name: 'path',
+    description: 'Endpoint path (omit for all endpoints)',
+    required: false,
+    example: '/api/properties',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Percentile data retrieved successfully',
+  })
+  @HttpCode(HttpStatus.OK)
+  async getPercentiles(
+    @Query('method') method?: string,
+    @Query('path') path?: string,
+    @Query() query?: PaginationQueryDto,
+  ) {
+    if (method && path) {
+      const percentiles = this.performanceMonitor.getEndpointPercentiles(
+        method,
+        path,
+      );
+
+      if (!percentiles) {
+        return {
+          message: 'No performance data found for this endpoint',
+          endpoint: path,
+          method,
+          timestamp: new Date().toISOString(),
+        };
+      }
+
+      return {
+        method,
+        endpoint: path,
+        percentiles,
+        timestamp: new Date().toISOString(),
+      };
+    }
+
+    const all = this.performanceMonitor.getAllEndpointPercentiles();
+    return {
+      ...PaginationUtils.paginateArray(
+        all,
+        query?.page || 1,
+        query?.limit || 20,
+      ),
       timestamp: new Date().toISOString(),
     };
   }

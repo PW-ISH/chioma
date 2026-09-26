@@ -2,7 +2,7 @@
 use soroban_sdk::{Address, Env, String};
 
 use crate::errors::PaymentError;
-use crate::storage::DataKey;
+use crate::storage::{extend_persistent_ttl, DataKey};
 use crate::types::{
     AgreementStatus, EscalationType, PaymentRecord, RentAgreement, RentEscalationConfig,
 };
@@ -32,9 +32,11 @@ pub fn calculate_rent_for_period(
             // Calculate escalated rent: Rent = BaseRent * (1 + rate)^years
             let mut current_rent = base_rent;
             for _ in 0..years_passed {
-                // annual_rate_bps is in basis points (1 bps = 0.01%)
-                let increase = (current_rent * (config.annual_rate_bps as i128)) / 10000;
-                current_rent += increase;
+                // annual_rate_bps is in basis points (1 bps = 0.01%).
+                // Compounding is saturating: an extreme rate/term combination
+                // must clamp rather than panic on overflow inside the contract.
+                let increase = current_rent.saturating_mul(config.annual_rate_bps as i128) / 10000;
+                current_rent = current_rent.saturating_add(increase);
             }
             current_rent
         }
@@ -143,15 +145,16 @@ pub fn pay_rent_with_agent(
     agreement.payment_count += 1;
 
     // Persist updated agreement
-    env.storage()
-        .persistent()
-        .set(&DataKey::Agreement(agreement_id.clone()), &agreement);
+    let agreement_key = DataKey::Agreement(agreement_id.clone());
+    env.storage().persistent().set(&agreement_key, &agreement);
+    extend_persistent_ttl(&env, &agreement_key);
 
     // Persist payment record
-    env.storage().persistent().set(
-        &DataKey::PaymentRecord(agreement_id.clone(), agreement.payment_count),
-        &payment_record,
-    );
+    let payment_record_key = DataKey::PaymentRecord(agreement_id.clone(), agreement.payment_count);
+    env.storage()
+        .persistent()
+        .set(&payment_record_key, &payment_record);
+    extend_persistent_ttl(&env, &payment_record_key);
 
     // Emit event
     env.events().publish(

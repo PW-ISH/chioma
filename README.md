@@ -120,6 +120,8 @@ Stellar Network
 
 ---
 
+Major structural decisions are recorded as Architecture Decision Records in [`docs/adr/`](docs/adr/README.md). New structural decisions require an ADR.
+
 ## Open Source First
 
 Chioma is being built **fully open‑source**
@@ -130,6 +132,21 @@ We welcome:
 - Reviewers
 - Anchor operators
 - Protocol researchers
+
+---
+
+## Security
+
+If you discover a security vulnerability, **please do not open a public issue.**
+
+Report it privately through one of the channels described in [SECURITY.md](./SECURITY.md):
+
+- **GitHub private vulnerability reporting** — Security tab → "Report a vulnerability"
+- **Email** — security@chioma.dev
+
+We follow a coordinated disclosure model and aim to acknowledge reports within 48 hours. See
+[SECURITY.md](./SECURITY.md) for full details on scope, response timelines, and responsible
+disclosure.
 
 ---
 
@@ -162,3 +179,7 @@ The wizard includes server-side AI helpers for:
 ### Draft Expiry
 
 Drafts automatically expire after **30 days** of inactivity. A cleanup task runs periodically to remove expired drafts.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).

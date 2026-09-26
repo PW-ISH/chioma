@@ -1,9 +1,11 @@
+import { Logger } from '@nestjs/common';
 import { I18nService } from '../src/modules/i18n/i18n.service';
 import { LoggerService } from '../src/common/services/logger.service';
 
 const logger = new LoggerService(undefined, 'i18n-manage');
 
 function run(): void {
+  const logger = new Logger('I18nManage');
   const i18n = new I18nService();
   const languages = i18n.getSupportedLanguages();
 
@@ -17,6 +19,7 @@ function run(): void {
     );
   }
 
+  logger.log('');
   logger.log('Sample translation checks');
   logger.log(`en common.ok: ${i18n.t('common.ok', 'en')}`);
   logger.log(`fr common.ok: ${i18n.t('common.ok', 'fr')}`);

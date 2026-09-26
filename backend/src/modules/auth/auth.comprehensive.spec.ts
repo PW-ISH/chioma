@@ -3,7 +3,10 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { UnauthorizedException } from '@nestjs/common';
+import {
+  AuthenticationError,
+  DuplicateEntryError,
+} from '../../common/errors/domain-errors';
 import { AuthService } from './auth.service';
 import { User, UserRole } from '../users/entities/user.entity';
 import { MfaDevice } from './entities/mfa-device.entity';
@@ -13,6 +16,9 @@ import { PasswordPolicyService } from './services/password-policy.service';
 import { ReferralService } from '../referral/referral.service';
 import { LoggerService } from '../../common/services/logger.service';
 import { LockService } from '../../common/lock';
+import { QueueManagementService } from '../queues/services/queue-management.service';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { EncryptedCacheService } from '../../common/cache/encrypted-cache.service';
 
 describe('AuthService — comprehensive coverage', () => {
   let service: AuthService;
@@ -78,11 +84,31 @@ describe('AuthService — comprehensive coverage', () => {
   const mockEmailService = {
     sendVerificationEmail: jest.fn().mockResolvedValue(undefined),
     sendPasswordResetEmail: jest.fn().mockResolvedValue(undefined),
+    sendAlertEmail: jest.fn().mockResolvedValue(undefined),
   };
 
   const mockReferralService = {
     generateReferralCode: jest.fn().mockResolvedValue('REF12345'),
     trackReferral: jest.fn().mockResolvedValue(undefined),
+    assignUniqueReferralCode: jest.fn(
+      async (save: (code: string) => Promise<unknown>) => ({
+        code: 'REF12345',
+        result: await save('REF12345'),
+      }),
+    ),
+  };
+
+  const mockQueueManagementService = {
+    addEmailJob: jest
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve({ finished: jest.fn().mockResolvedValue(undefined) }),
+      ),
+    addDataSyncJob: jest
+      .fn()
+      .mockImplementation(() =>
+        Promise.resolve({ finished: jest.fn().mockResolvedValue(undefined) }),
+      ),
   };
 
   const mockLoggerService = {
@@ -108,6 +134,10 @@ describe('AuthService — comprehensive coverage', () => {
         { provide: ReferralService, useValue: mockReferralService },
         { provide: LoggerService, useValue: mockLoggerService },
         {
+          provide: QueueManagementService,
+          useValue: mockQueueManagementService,
+        },
+        {
           provide: LockService,
           useValue: {
             withLock: jest.fn(
@@ -115,6 +145,14 @@ describe('AuthService — comprehensive coverage', () => {
                 fn(),
             ),
           },
+        },
+        {
+          provide: CACHE_MANAGER,
+          useValue: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
+        },
+        {
+          provide: EncryptedCacheService,
+          useValue: { get: jest.fn(), set: jest.fn(), del: jest.fn() },
         },
       ],
     }).compile();
@@ -163,6 +201,49 @@ describe('AuthService — comprehensive coverage', () => {
         expect.objectContaining({ sub: 'user-1', type: 'refresh' }),
         expect.objectContaining({ secret: 'test-refresh-secret' }),
       );
+    });
+  });
+
+  // ── register ─────────────────────────────────────────────────────────────
+
+  describe('register', () => {
+    it('throws DuplicateEntryError when email is already registered', async () => {
+      mockUserRepository.findOne.mockResolvedValue(mockUser);
+
+      await expect(
+        service.register({
+          email: 'user@example.com',
+          password: 'Password123!',
+          firstName: 'Jane',
+          lastName: 'Doe',
+          role: UserRole.USER,
+        }),
+      ).rejects.toThrow(DuplicateEntryError);
+    });
+
+    it('successfully registers a new user', async () => {
+      mockUserRepository.findOne.mockResolvedValue(null);
+      mockUserRepository.create.mockReturnValue(mockUser);
+      mockUserRepository.save.mockResolvedValue(mockUser);
+      jest.spyOn(bcrypt, 'hash').mockResolvedValue('hashed-password' as never);
+
+      const result = await service.register({
+        email: 'user@example.com',
+        password: 'Password123!',
+        firstName: 'Jane',
+        lastName: 'Doe',
+        role: UserRole.USER,
+      });
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          user: expect.objectContaining({
+            email: 'user@example.com',
+          }),
+        }),
+      );
+      expect(mockUserRepository.create).toHaveBeenCalled();
+      expect(mockUserRepository.save).toHaveBeenCalled();
     });
   });
 
@@ -228,7 +309,7 @@ describe('AuthService — comprehensive coverage', () => {
       expect(mockUserRepository.update).toHaveBeenCalled();
     });
 
-    it('throws UnauthorizedException when token type is not "refresh"', async () => {
+    it('throws AuthenticationError when token type is not "refresh"', async () => {
       mockJwtService.verify.mockReturnValue({
         sub: 'user-1',
         email: 'user@example.com',
@@ -238,10 +319,10 @@ describe('AuthService — comprehensive coverage', () => {
 
       await expect(
         service.refreshToken({ refreshToken: 'access-token-used-as-refresh' }),
-      ).rejects.toThrow(UnauthorizedException);
+      ).rejects.toThrow(AuthenticationError);
     });
 
-    it('throws UnauthorizedException when the stored refresh token is revoked (null)', async () => {
+    it('throws AuthenticationError when the stored refresh token is revoked (null)', async () => {
       mockJwtService.verify.mockReturnValue({
         sub: 'user-1',
         email: 'user@example.com',
@@ -255,10 +336,10 @@ describe('AuthService — comprehensive coverage', () => {
 
       await expect(
         service.refreshToken({ refreshToken: 'revoked-token' }),
-      ).rejects.toThrow(UnauthorizedException);
+      ).rejects.toThrow(AuthenticationError);
     });
 
-    it('throws UnauthorizedException when user is not found', async () => {
+    it('throws AuthenticationError when user is not found', async () => {
       mockJwtService.verify.mockReturnValue({
         sub: 'ghost-user',
         email: 'ghost@example.com',
@@ -269,10 +350,10 @@ describe('AuthService — comprehensive coverage', () => {
 
       await expect(
         service.refreshToken({ refreshToken: 'unknown-token' }),
-      ).rejects.toThrow(UnauthorizedException);
+      ).rejects.toThrow(AuthenticationError);
     });
 
-    it('throws UnauthorizedException when bcrypt comparison fails (token mismatch)', async () => {
+    it('throws AuthenticationError when bcrypt comparison fails (token mismatch)', async () => {
       mockJwtService.verify.mockReturnValue({
         sub: 'user-1',
         email: 'user@example.com',
@@ -284,17 +365,17 @@ describe('AuthService — comprehensive coverage', () => {
 
       await expect(
         service.refreshToken({ refreshToken: 'tampered-token' }),
-      ).rejects.toThrow(UnauthorizedException);
+      ).rejects.toThrow(AuthenticationError);
     });
 
-    it('throws UnauthorizedException when jwtService.verify throws', async () => {
+    it('throws AuthenticationError when jwtService.verify throws', async () => {
       mockJwtService.verify.mockImplementation(() => {
         throw new Error('jwt expired');
       });
 
       await expect(
         service.refreshToken({ refreshToken: 'expired-token' }),
-      ).rejects.toThrow(UnauthorizedException);
+      ).rejects.toThrow(AuthenticationError);
     });
   });
 
@@ -334,14 +415,17 @@ describe('AuthService — comprehensive coverage', () => {
 
       await expect(
         service.login({ email: 'user@example.com', password: 'wrong' }),
-      ).rejects.toThrow(UnauthorizedException);
+      ).rejects.toThrow(AuthenticationError);
 
       expect(mockUserRepository.save).toHaveBeenCalledWith(
-        expect.objectContaining({ failedLoginAttempts: 4 }),
+        expect.objectContaining({
+          failedLoginAttempts: 4,
+          accountLockedUntil: null,
+        }),
       );
     });
 
-    it('sets accountLockedUntil when failedLoginAttempts reaches 5', async () => {
+    it('does not set accountLockedUntil on the 5th failed attempt (starting at 4)', async () => {
       const user = { ...mockUser, failedLoginAttempts: 4 };
       mockUserRepository.findOne.mockResolvedValue(user);
       jest.spyOn(bcrypt, 'compare').mockResolvedValue(false as never);
@@ -349,11 +433,29 @@ describe('AuthService — comprehensive coverage', () => {
 
       await expect(
         service.login({ email: 'user@example.com', password: 'wrong' }),
-      ).rejects.toThrow(UnauthorizedException);
+      ).rejects.toThrow(AuthenticationError);
 
       expect(mockUserRepository.save).toHaveBeenCalledWith(
         expect.objectContaining({
           failedLoginAttempts: 5,
+          accountLockedUntil: null,
+        }),
+      );
+    });
+
+    it('sets accountLockedUntil on the 6th failed attempt (starting at 5)', async () => {
+      const user = { ...mockUser, failedLoginAttempts: 5 };
+      mockUserRepository.findOne.mockResolvedValue(user);
+      jest.spyOn(bcrypt, 'compare').mockResolvedValue(false as never);
+      mockUserRepository.save.mockImplementation(async (u: typeof user) => u);
+
+      await expect(
+        service.login({ email: 'user@example.com', password: 'wrong' }),
+      ).rejects.toThrow(AuthenticationError);
+
+      expect(mockUserRepository.save).toHaveBeenCalledWith(
+        expect.objectContaining({
+          failedLoginAttempts: 6,
           accountLockedUntil: expect.any(Date),
         }),
       );
@@ -392,7 +494,7 @@ describe('AuthService — comprehensive coverage', () => {
 
       await expect(
         service.login({ email: 'user@example.com', password: 'any-password' }),
-      ).rejects.toThrow(UnauthorizedException);
+      ).rejects.toThrow(AuthenticationError);
     });
   });
 
