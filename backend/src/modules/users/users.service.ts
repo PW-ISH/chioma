@@ -356,6 +356,33 @@ export class UsersService {
     return this.findById(userId, withDeleted);
   }
 
+  /**
+   * Record that the user has completed email onboarding.
+   * Idempotent — safe to call multiple times.
+   */
+  async markEmailCollected(userId: string): Promise<{ emailCollectedAt: Date }> {
+    const user = await this.findById(userId);
+    if (!user.emailCollectedAt) {
+      user.emailCollectedAt = new Date();
+      await this.userRepository.save(user);
+      this.logger.log(`Email onboarding completed for user: ${userId}`);
+    }
+    return { emailCollectedAt: user.emailCollectedAt };
+  }
+
+  /**
+   * Return whether the user has completed email onboarding.
+   */
+  async getEmailOnboardingStatus(
+    userId: string,
+  ): Promise<{ emailCollected: boolean; emailCollectedAt: Date | null }> {
+    const user = await this.findById(userId);
+    return {
+      emailCollected: !!user.emailCollectedAt,
+      emailCollectedAt: user.emailCollectedAt ?? null,
+    };
+  }
+
   private hashLookupValue(value: string): string {
     return createHash('sha256')
       .update(value.trim().toLowerCase())

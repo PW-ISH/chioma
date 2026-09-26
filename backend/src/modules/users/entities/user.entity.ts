@@ -194,6 +194,14 @@ export class User {
   @Column({ name: 'refresh_token', nullable: true, type: 'varchar' })
   refreshToken: string | null;
 
+  @Column({
+    name: 'email_collected_at',
+    type: 'timestamp',
+    nullable: true,
+    default: null,
+  })
+  emailCollectedAt: Date | null;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
