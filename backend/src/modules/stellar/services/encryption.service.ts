@@ -1,8 +1,40 @@
-import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { HttpStatus } from '@nestjs/common';
 import * as nacl from 'tweetnacl';
 import { StellarConfig } from '../config/stellar.config';
-import { ConfigurationError } from '../../../common/errors';
+import { ConfigurationError, BaseAppError, ErrorCode } from '../../../common/errors';
+import { MetricsService } from '../../monitoring/metrics.service';
+
+// ── Structured decryption error ──────────────────────────────────────────────
+
+/** Discriminator for the root cause of a decryption failure. */
+export type DecryptionFailureReason =
+  | 'INVALID_FORMAT'   // base64 parse failed or payload too short to contain nonce
+  | 'INVALID_KEY'      // key material is confirmed wrong (startup self-test path)
+  | 'CORRUPTED_DATA'   // payload is well-formed but MAC verification failed
+  | 'TAMPERING';       // structurally valid, full-length payload, MAC failed → likely tamper
+
+export class DecryptionError extends BaseAppError {
+  public readonly reason: DecryptionFailureReason;
+
+  constructor(reason: DecryptionFailureReason, context?: Record<string, unknown>) {
+    const messages: Record<DecryptionFailureReason, string> = {
+      INVALID_FORMAT:  'Decryption failed: malformed or truncated ciphertext',
+      INVALID_KEY:     'Decryption failed: incorrect encryption key',
+      CORRUPTED_DATA:  'Decryption failed: ciphertext is corrupted',
+      TAMPERING:       'Decryption failed: authentication tag mismatch — possible tampering',
+    };
+    super(
+      ErrorCode.DECRYPTION_ERROR,
+      HttpStatus.BAD_REQUEST,
+      messages[reason],
+      true,
+      { reason, ...context },
+    );
+    this.reason = reason;
+  }
+}
 
 /** Minimum length (chars) accepted for a raw encryption key string. */
 const MIN_KEY_LENGTH = 32;
@@ -27,7 +59,10 @@ export class EncryptionService implements OnModuleInit {
    */
   private readonly keyInvalidReason: string | null;
 
-  constructor(private readonly configService: ConfigService) {
+  constructor(
+    private readonly configService: ConfigService,
+    @Optional() private readonly metricsService?: MetricsService,
+  ) {
     const keyString =
       this.configService.get<StellarConfig>('stellar')?.encryptionKey ?? '';
 
@@ -151,35 +186,63 @@ export class EncryptionService implements OnModuleInit {
    * Decrypts an encrypted secret key.
    * @param encryptedData - Base64 encoded encrypted data (nonce + ciphertext)
    * @returns Decrypted secret key
+   * @throws {DecryptionError} with a discriminated `reason` field
    */
   decrypt(encryptedData: string): string {
     this.assertKeyValid();
 
+    // ── 1. Parse & structural validation ──────────────────────────────────
+    let combined: Buffer;
     try {
-      // Decode from base64
-      const combined = Buffer.from(encryptedData, 'base64');
-
-      // Extract nonce and ciphertext
-      const nonce = combined.slice(0, nacl.secretbox.nonceLength);
-      const ciphertext = combined.slice(nacl.secretbox.nonceLength);
-
-      // Decrypt the message
-      const decrypted = nacl.secretbox.open(
-        new Uint8Array(ciphertext),
-        new Uint8Array(nonce),
-        this.encryptionKey,
-      );
-
-      if (!decrypted) {
-        throw new Error('Decryption failed - invalid key or corrupted data');
-      }
-
-      const decoder = new TextDecoder();
-      return decoder.decode(decrypted);
-    } catch (error) {
-      this.logger.error('Decryption failed', error);
-      throw new Error('Failed to decrypt secret key');
+      combined = Buffer.from(encryptedData, 'base64');
+    } catch {
+      this.recordDecryptionFailure('INVALID_FORMAT');
+      throw new DecryptionError('INVALID_FORMAT', { hint: 'base64 decode failed' });
     }
+
+    if (combined.length <= nacl.secretbox.nonceLength) {
+      this.recordDecryptionFailure('INVALID_FORMAT');
+      throw new DecryptionError('INVALID_FORMAT', {
+        hint: `payload length ${combined.length} ≤ nonce length ${nacl.secretbox.nonceLength}`,
+      });
+    }
+
+    // ── 2. Extract nonce + ciphertext ──────────────────────────────────────
+    const nonce = new Uint8Array(combined.buffer, combined.byteOffset, nacl.secretbox.nonceLength);
+    const ciphertext = new Uint8Array(
+      combined.buffer,
+      combined.byteOffset + nacl.secretbox.nonceLength,
+      combined.length - nacl.secretbox.nonceLength,
+    );
+
+    // ── 3. Attempt authenticated decryption ────────────────────────────────
+    let decrypted: Uint8Array | null;
+    try {
+      decrypted = nacl.secretbox.open(ciphertext, nonce, this.encryptionKey);
+    } catch (err) {
+      // nacl itself threw — treat as corrupted
+      this.recordDecryptionFailure('CORRUPTED_DATA');
+      this.logger.error('nacl.secretbox.open threw unexpectedly', err);
+      throw new DecryptionError('CORRUPTED_DATA', { hint: 'nacl threw during open' });
+    }
+
+    if (decrypted === null) {
+      // NaCl Poly1305 MAC failure. Structurally valid payloads (correct length,
+      // proper nonce) that fail MAC are most likely tampered; undersized or
+      // truncated ciphertext sections indicate corruption.
+      const minCiphertextLen = nacl.secretbox.overheadLength; // 16-byte tag minimum
+      const reason: DecryptionFailureReason =
+        ciphertext.length >= minCiphertextLen ? 'TAMPERING' : 'CORRUPTED_DATA';
+
+      this.recordDecryptionFailure(reason);
+      this.logger.warn(
+        `Decryption MAC failure — classified as ${reason}. ` +
+          `ciphertextLen=${ciphertext.length}, minExpected=${minCiphertextLen}`,
+      );
+      throw new DecryptionError(reason);
+    }
+
+    return new TextDecoder().decode(decrypted);
   }
 
   /**
@@ -277,5 +340,11 @@ export class EncryptionService implements OnModuleInit {
     const encoder = new TextEncoder();
     const hash = nacl.hash(encoder.encode(keyString));
     return hash.slice(0, nacl.secretbox.keyLength);
+  }
+
+  /** Records a decryption failure metric and logs a warning. */
+  private recordDecryptionFailure(reason: DecryptionFailureReason): void {
+    this.metricsService?.recordDecryptionFailure(reason);
+    this.logger.warn(`Decryption failure: ${reason}`);
   }
 }
