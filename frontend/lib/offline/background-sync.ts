@@ -5,7 +5,7 @@
 
 import { syncOfflineData } from './sync-manager';
 import { setMetadata, getMetadata } from './db';
-import { logger } from '../logger';
+import { Logger } from '../logger';
 
 declare global {
   interface Window {

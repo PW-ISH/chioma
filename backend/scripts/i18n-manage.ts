@@ -4,6 +4,8 @@ import { LoggerService } from '../src/common/services/logger.service';
 
 const logger = new LoggerService(undefined, 'i18n-manage');
 
+const CONTEXT = 'I18nManage';
+
 function run(): void {
   const logger = new Logger('I18nManage');
   const i18n = new I18nService();
@@ -27,6 +29,7 @@ function run(): void {
   logger.log(
     `ar security.accountLocked: ${i18n.t('security.accountLocked', 'ar')}`,
   );
+  Logger.log('I18n language coverage audit completed', CONTEXT);
 }
 
 run();
