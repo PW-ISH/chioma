@@ -1,5 +1,8 @@
 import { Logger } from '@nestjs/common';
 import { I18nService } from '../src/modules/i18n/i18n.service';
+import { LoggerService } from '../src/common/services/logger.service';
+
+const logger = new LoggerService(undefined, 'i18n-manage');
 
 const CONTEXT = 'I18nManage';
 

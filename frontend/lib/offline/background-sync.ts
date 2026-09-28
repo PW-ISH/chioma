@@ -113,7 +113,7 @@ export async function shouldSync(): Promise<boolean> {
 
 // ─── Fallback Periodic Sync ──────────────────────────────────────────────────
 
-let periodicSyncInterval: NodeJS.Timeout | null = null;
+let periodicSyncInterval: ReturnType<typeof setInterval> | null = null;
 
 /**
  * Setup periodic sync as fallback when Background Sync API is not available.
