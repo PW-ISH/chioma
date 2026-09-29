@@ -6,8 +6,15 @@ import {
   InternalServerErrorException,
   Inject,
   Optional,
+  OnModuleInit,
+  Controller,
+  Get,
+  HttpStatus,
+  Res,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Response } from 'express';
 import {
   Keypair,
   Networks,
@@ -69,6 +76,7 @@ export interface SorobanConnectionState {
 export class SorobanClientService implements OnModuleInit {
   private readonly logger = new Logger(SorobanClientService.name);
   private readonly server: SorobanRpc.Server;
+  private readonly rpcUrl: string;
   private readonly contractId: string;
   private readonly networkPassphrase: string;
   private readonly rpcUrl: string;
@@ -91,6 +99,11 @@ export class SorobanClientService implements OnModuleInit {
     this.server = new SorobanRpc.Server(this.rpcUrl);
     this.contractId = this.configService.get<string>('CHIOMA_CONTRACT_ID', '');
     this.networkPassphrase = this.getNetworkPassphrase();
+    this.connectAttempts = this.readPositiveInt('SOROBAN_CONNECT_ATTEMPTS', 3);
+    this.connectBaseDelayMs = this.readNonNegativeInt(
+      'SOROBAN_CONNECT_BASE_DELAY_MS',
+      200,
+    );
 
     this.connectionState = {
       status: 'disconnected',
@@ -480,5 +493,24 @@ export class SorobanClientService implements OnModuleInit {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+}
+
+@ApiTags('Health')
+@Controller('health/soroban')
+export class SorobanHealthController {
+  constructor(private readonly sorobanClient: SorobanClientService) {}
+
+  @Get()
+  @ApiOperation({
+    summary: 'Soroban RPC health',
+    description:
+      'Probes the configured Soroban RPC. Returns 503 when the blockchain endpoint is unreachable.',
+  })
+  async check(@Res() res: Response) {
+    const result = await this.sorobanClient.checkHealth();
+    const status =
+      result.status === 'up' ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE;
+    return res.status(status).json(result);
   }
 }

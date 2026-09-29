@@ -10,6 +10,7 @@ import {
   classifySorobanError,
   sorobanBackoffMs,
 } from '../../../common/services/soroban-errors';
+import * as StellarSdk from '@stellar/stellar-sdk';
 import { BlockchainTransactionError } from '../../../common/errors';
 
 export interface MintObligationParams {
@@ -113,6 +114,15 @@ export class RentObligationNftService {
 
       const txHash = await this.submitWithRetry(
         tx,
+      const response = await this.server.sendTransaction(tx);
+      assertSorobanSubmissionAccepted(response);
+      await waitForSorobanTransactionSuccess(
+        this.server,
+        response.hash,
+        this.configService,
+      const response = await this.server.sendTransaction(tx);
+      const txHash = this.extractTransactionHash(
+        response,
         `mint_obligation(${params.agreementId})`,
       );
 
@@ -152,6 +162,15 @@ export class RentObligationNftService {
 
       const txHash = await this.submitWithRetry(
         tx,
+      const response = await this.server.sendTransaction(tx);
+      assertSorobanSubmissionAccepted(response);
+      await waitForSorobanTransactionSuccess(
+        this.server,
+        response.hash,
+        this.configService,
+      const response = await this.server.sendTransaction(tx);
+      const txHash = this.extractTransactionHash(
+        response,
         `transfer_obligation(${params.agreementId})`,
       );
 
@@ -340,6 +359,15 @@ export class RentObligationNftService {
 
       const txHash = await this.submitWithRetry(
         tx,
+      const response = await this.server.sendTransaction(tx);
+      assertSorobanSubmissionAccepted(response);
+      await waitForSorobanTransactionSuccess(
+        this.server,
+        response.hash,
+        this.configService,
+      const response = await this.server.sendTransaction(tx);
+      const txHash = this.extractTransactionHash(
+        response,
         `burn_nft(${params.tokenId})`,
       );
 
@@ -373,6 +401,15 @@ export class RentObligationNftService {
 
       const txHash = await this.submitWithRetry(
         tx,
+      const response = await this.server.sendTransaction(tx);
+      assertSorobanSubmissionAccepted(response);
+      await waitForSorobanTransactionSuccess(
+        this.server,
+        response.hash,
+        this.configService,
+      const response = await this.server.sendTransaction(tx);
+      const txHash = this.extractTransactionHash(
+        response,
         `admin_reassign_obligation(${params.agreementId})`,
       );
 
